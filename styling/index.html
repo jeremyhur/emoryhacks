@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
+    <title>ATC Control Center</title>
+</head>
+<body>
+    <!-- ATC Header -->
+    <header class="atc-header">
+        <div class="atc-title">
+            <span class="atc-callsign">ATC</span>
+            <span class="atc-frequency">FREQ: 121.500</span>
+        </div>
+        <div class="atc-status">
+            <span id="status-indicator" class="status-standby">● STANDBY</span>
+        </div>
+    </header>
+
+    <main class="atc-main">
+        <!-- Left Panel: Visual Radar Display -->
+        <div class="radar-panel">
+            <div class="panel-header">
+                <span class="panel-label">RADAR DISPLAY</span>
+                <span class="panel-id">SECTOR ALPHA</span>
+            </div>
+            <div class="radar-screen">
+                <div class="radar-grid"></div>
+                <video id="video" autoplay="true" playsinline="true"></video>
+                <div class="radar-overlay">
+                    <div class="radar-sweep"></div>
+                </div>
+            </div>
+            <div class="panel-footer">
+                <span>VISUAL ANALYSIS: <span id="visual-status" class="status-text">ACTIVE</span></span>
+            </div>
+        </div>
+
+        <!-- Right Panel: Communication & Analysis -->
+        <div class="comm-panel">
+            <div class="panel-header">
+                <span class="panel-label">COMMUNICATION LOG</span>
+                <span class="panel-id">VOICE ANALYSIS</span>
+            </div>
+            
+            <div class="comm-controls">
+                <button id="play" class="atc-button atc-button-primary">
+                    <span class="button-icon">📡</span>
+                    <span class="button-text">COMMENCE TRANSMISSION</span>
+                </button>
+                <button id="stop" class="atc-button atc-button-secondary">
+                    <span class="button-icon">⏹</span>
+                    <span class="button-text">END TRANSMISSION</span>
+                </button>
+            </div>
+
+            <div class="comm-display">
+                <div class="display-section">
+                    <div class="section-header">EMOTION ANALYSIS</div>
+                    <div id="label" class="emotion-label">---</div>
+                </div>
+
+                <div class="display-section">
+                    <div class="section-header">SPECTROGRAM</div>
+                    <div id="spectrogram-container" class="spectrogram-display"></div>
+                    <div class="transcription-below-spectrogram">
+                        <div class="section-header-small">TRANSCRIPTION</div>
+                        <div id="transcription" class="transcription-text">AWAITING TRANSMISSION...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <!-- Loading screen -->
+    <div id="cover-background">
+        <div id="airplane-container">
+            <img id="airplane" src="assets/plane.png" alt="Airplane">
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

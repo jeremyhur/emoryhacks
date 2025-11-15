@@ -1,0 +1,458 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --atc-dark: #0a0e0a;
+    --atc-green: #00ff41;
+    --atc-amber: #ffaa00;
+    --atc-red: #ff0040;
+    --atc-blue: #00aaff;
+    --atc-bg: #0d1a0d;
+    --atc-panel: #0f1f0f;
+    --atc-border: #1a3a1a;
+    --atc-grid: rgba(0, 255, 65, 0.1);
+}
+
+body {
+    font-family: 'Courier New', 'Monaco', monospace;
+    background: var(--atc-dark);
+    color: var(--atc-green);
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+}
+
+/* ATC Header */
+.atc-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 20px;
+    background: var(--atc-panel);
+    border-bottom: 2px solid var(--atc-green);
+    box-shadow: 0 2px 10px rgba(0, 255, 65, 0.3);
+    z-index: 100;
+}
+
+.atc-title {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.atc-callsign {
+    font-size: 24px;
+    font-weight: bold;
+    color: var(--atc-green);
+    text-shadow: 0 0 10px var(--atc-green);
+    letter-spacing: 3px;
+}
+
+.atc-frequency {
+    font-size: 14px;
+    color: var(--atc-amber);
+    letter-spacing: 2px;
+}
+
+.atc-status {
+    font-size: 16px;
+    letter-spacing: 2px;
+}
+
+.status-standby {
+    color: var(--atc-amber);
+    text-shadow: 0 0 8px var(--atc-amber);
+}
+
+.status-active {
+    color: var(--atc-green);
+    text-shadow: 0 0 8px var(--atc-green);
+    animation: pulse 2s infinite;
+}
+
+.status-recording {
+    color: var(--atc-red);
+    text-shadow: 0 0 8px var(--atc-red);
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* Main Layout */
+.atc-main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: calc(100vh - 60px);
+    gap: 2px;
+    background: var(--atc-border);
+    padding: 2px;
+}
+
+/* Panel Styles */
+.radar-panel,
+.comm-panel {
+    background: var(--atc-panel);
+    border: 2px solid var(--atc-border);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 15px;
+    background: var(--atc-bg);
+    border-bottom: 1px solid var(--atc-border);
+    font-size: 12px;
+    letter-spacing: 2px;
+}
+
+.panel-label {
+    color: var(--atc-green);
+    font-weight: bold;
+}
+
+.panel-id {
+    color: var(--atc-amber);
+    font-size: 10px;
+}
+
+.panel-footer {
+    padding: 8px 15px;
+    background: var(--atc-bg);
+    border-top: 1px solid var(--atc-border);
+    font-size: 11px;
+    color: var(--atc-green);
+    letter-spacing: 1px;
+}
+
+.status-text {
+    color: var(--atc-amber);
+    font-weight: bold;
+}
+
+/* Radar Screen */
+.radar-screen {
+    flex: 1;
+    position: relative;
+    margin: 10px;
+    background: var(--atc-dark);
+    border: 2px solid var(--atc-green);
+    box-shadow: inset 0 0 20px rgba(0, 255, 65, 0.2), 0 0 20px rgba(0, 255, 65, 0.1);
+    overflow: hidden;
+}
+
+.radar-grid {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: 
+        linear-gradient(rgba(0, 255, 65, 0.1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 255, 65, 0.1) 1px, transparent 1px);
+    background-size: 50px 50px;
+    z-index: 1;
+}
+
+#video {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 2;
+    filter: contrast(1.2) brightness(0.9);
+}
+
+.radar-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 3;
+}
+
+.radar-sweep {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 200%;
+    height: 2px;
+    background: linear-gradient(90deg, 
+        transparent 0%, 
+        var(--atc-green) 50%, 
+        transparent 100%);
+    transform-origin: center;
+    animation: sweep 4s linear infinite;
+    opacity: 0.6;
+}
+
+@keyframes sweep {
+    0% { transform: translate(-50%, -50%) rotate(0deg); }
+    100% { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+/* Communication Panel */
+.comm-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+.comm-controls {
+    display: flex;
+    gap: 10px;
+    padding: 15px;
+    justify-content: center;
+    border-bottom: 1px solid var(--atc-border);
+}
+
+/* ATC Buttons */
+.atc-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    border: 2px solid;
+    background: transparent;
+    color: var(--atc-green);
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 0.3s;
+    text-transform: uppercase;
+    position: relative;
+    overflow: hidden;
+}
+
+.atc-button::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 255, 65, 0.1);
+    transition: left 0.3s;
+}
+
+.atc-button:hover::before {
+    left: 0;
+}
+
+.atc-button-primary {
+    border-color: var(--atc-green);
+    box-shadow: 0 0 10px rgba(0, 255, 65, 0.3);
+}
+
+.atc-button-primary:hover {
+    background: rgba(0, 255, 65, 0.1);
+    box-shadow: 0 0 20px rgba(0, 255, 65, 0.5);
+    transform: translateY(-2px);
+}
+
+.atc-button-secondary {
+    border-color: var(--atc-amber);
+    color: var(--atc-amber);
+    box-shadow: 0 0 10px rgba(255, 170, 0, 0.3);
+}
+
+.atc-button-secondary:hover {
+    background: rgba(255, 170, 0, 0.1);
+    box-shadow: 0 0 20px rgba(255, 170, 0, 0.5);
+    transform: translateY(-2px);
+}
+
+.atc-button:active {
+    transform: translateY(0);
+}
+
+.button-icon {
+    font-size: 16px;
+}
+
+.button-text {
+    font-size: 11px;
+}
+
+/* Communication Display */
+.comm-display {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 15px;
+    gap: 15px;
+    overflow-y: auto;
+}
+
+.display-section {
+    background: var(--atc-bg);
+    border: 1px solid var(--atc-border);
+    padding: 12px;
+    min-height: 80px;
+}
+
+.section-header {
+    font-size: 10px;
+    color: var(--atc-amber);
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--atc-border);
+    padding-bottom: 5px;
+}
+
+.transcription-text {
+    font-size: 14px;
+    color: var(--atc-green);
+    line-height: 1.6;
+    min-height: 40px;
+    font-family: 'Courier New', monospace;
+    word-wrap: break-word;
+}
+
+.emotion-label {
+    font-size: 18px;
+    color: var(--atc-green);
+    font-weight: bold;
+    letter-spacing: 2px;
+    text-align: center;
+    padding: 10px;
+    border: 1px solid var(--atc-border);
+    background: rgba(0, 255, 65, 0.05);
+}
+
+.spectrogram-display {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 150px;
+    background: var(--atc-dark);
+    border: 1px solid var(--atc-border);
+    overflow: hidden;
+    gap: 10px;
+    padding: 10px;
+}
+
+#spectrogram-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+}
+
+#spectrogram-container canvas {
+    max-width: 100%;
+    max-height: 200px;
+    border: 1px solid var(--atc-green);
+    box-shadow: 0 0 10px rgba(0, 255, 65, 0.3);
+}
+
+.transcription-below-spectrogram {
+    width: 100%;
+    padding-top: 10px;
+    border-top: 1px solid var(--atc-border);
+}
+
+.section-header-small {
+    font-size: 9px;
+    color: var(--atc-amber);
+    letter-spacing: 1.5px;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+}
+
+/* Loading Screen */
+#cover-background {
+    background-image: url('assets/runway.jpg');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    width: 100vw;
+    height: 100vh;
+    top: 0;
+    left: 0;
+    opacity: 100%;
+    position: absolute;
+    transition: 1s ease;
+    z-index: 1000;
+}
+
+#airplane-container {
+    position: absolute;
+    left: 50vw;
+    top: 50vh;
+    width: 300px;
+    height: 300px;
+    transform: translate(-50%, -50%);
+    opacity: 100%;
+    animation-name: airplane-fly-in;
+    animation-duration: 2s;
+    animation-timing-function: ease-out;
+    animation-play-state: running;
+    animation-iteration-count: 1;
+    animation-fill-mode: forwards;
+    transition: opacity 1s ease;
+}
+
+#airplane {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.8));
+}
+
+@keyframes airplane-fly-in {
+    0% {
+        transform: translate(-50%, -50%) translate(-150vw, -100vh) rotate(-45deg) scale(0.5);
+        opacity: 0%;
+    }
+    50% {
+        opacity: 100%;
+    }
+    100% {
+        transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
+        opacity: 100%;
+    }
+}
+
+@keyframes plotFade {
+    0% {
+        transform: scale(0%);
+        opacity: 0;
+    }
+    100% {
+        transform: scale(100%);
+        opacity: 1;
+    }
+}
+
+/* Scrollbar Styling */
+.comm-display::-webkit-scrollbar {
+    width: 8px;
+}
+
+.comm-display::-webkit-scrollbar-track {
+    background: var(--atc-bg);
+}
+
+.comm-display::-webkit-scrollbar-thumb {
+    background: var(--atc-green);
+    border-radius: 4px;
+}
+
+.comm-display::-webkit-scrollbar-thumb:hover {
+    background: var(--atc-amber);
+}
