@@ -616,7 +616,11 @@ class AudioAnalyzer:
 #
 
 async def get_index_html(request):
-    content = open(os.path.join(ROOT, "index.html"), "r").read()
+    # Check if index.html is in styling directory, otherwise use root
+    html_path = os.path.join(ROOT, "styling", "index.html")
+    if not os.path.exists(html_path):
+        html_path = os.path.join(ROOT, "index.html")
+    content = open(html_path, "r").read()
     return web.Response(content_type="text/html", text=content)
 
 async def get_main_js(request):
@@ -624,7 +628,11 @@ async def get_main_js(request):
     return web.Response(content_type="application/javascript", text=content)
 
 async def get_style_css(request):
-    content = open(os.path.join(ROOT, "style.css"), "r").read()
+    # Check if style.css is in styling directory, otherwise use root
+    css_path = os.path.join(ROOT, "styling", "style.css")
+    if not os.path.exists(css_path):
+        css_path = os.path.join(ROOT, "style.css")
+    content = open(css_path, "r").read()
     return web.Response(content_type="text/css", text=content)
 
 async def get_asset(request):
