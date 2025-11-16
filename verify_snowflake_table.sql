@@ -34,12 +34,16 @@ CREATE TABLE IF NOT EXISTS MONITORING_SESSIONS (
     ACTIVE_PERCENTAGE FLOAT,
     FATIGUED_PERCENTAGE FLOAT,
     AI_SUPERVISOR_REPORT TEXT,
-    FILENAME VARCHAR(255)
+    FILENAME VARCHAR(255),
+    SPECTROGRAM_URL VARCHAR(500)
 );
+
+-- STEP 6b: If the table already exists, add the SPECTROGRAM_URL column
+-- ALTER TABLE MONITORING_SESSIONS ADD COLUMN IF NOT EXISTS SPECTROGRAM_URL VARCHAR(500);
 
 -- STEP 7: Verify the table structure again
 DESCRIBE TABLE MONITORING_SESSIONS;
 
--- You should see all 13 columns listed above
+-- You should see all 14 columns listed above
 -- If you see them, the table is ready!
 

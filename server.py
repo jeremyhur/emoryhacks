@@ -618,12 +618,32 @@ class AudioAnalyzer:
                 new_height = int(height * scale)
                 data = cv2.resize(data, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
+            # Save spectrogram image to file
+            # Generate spectrogram filename based on audio filename
+            base_filename = os.path.splitext(os.path.basename(filename))[0]
+            recordings_dir = os.path.dirname(filename) if os.path.dirname(filename) else os.path.join(ROOT, "recordings")
+            spectrogram_filename = os.path.join(recordings_dir, f"{base_filename}_spectrogram.png")
+            
+            # Convert RGBA to RGB for saving (PNG supports RGBA, but we'll use RGB for compatibility)
+            # Save using PIL Image for better compatibility
+            spectrogram_image = Image.fromarray(data, 'RGBA')
+            # Convert to RGB if needed (some formats prefer RGB)
+            if spectrogram_image.mode == 'RGBA':
+                # Create white background and composite
+                rgb_image = Image.new('RGB', spectrogram_image.size, (0, 0, 0))  # Black background
+                rgb_image.paste(spectrogram_image, mask=spectrogram_image.split()[3])  # Use alpha channel as mask
+                spectrogram_image = rgb_image
+            
+            spectrogram_image.save(spectrogram_filename, 'PNG')
+            logger.info(f"Saved spectrogram image to: {spectrogram_filename}")
+
             # Optimize: Only convert necessary data to lists (saliency can be large, skip if not needed)
             output_queue.put({
                 "waveform": waveform.cpu().numpy().tolist(),  # More efficient than .tolist() on tensor
                 "spectrogramImageData": data.flatten().tolist(),
                 "spectrogramHeight": int(data.shape[0]),
                 "spectrogramWidth": int(data.shape[1]),
+                "spectrogramFilename": spectrogram_filename,  # Add filename for upload
                 "saliency": saliency_map.numpy().tolist(),  # Already on CPU
                 "logits": logits.cpu().numpy().tolist(),  # More efficient conversion
                 "labels": ["Neutral", "Happy", "Angry", "Sad"],
@@ -894,6 +914,7 @@ async def write_to_snowflake(session_data: dict):
             fatigued_percentage = session_data.get("fatigued_percentage", 0.0)
             ai_supervisor_report = session_data.get("ai_supervisor_report", "")
             filename = session_data.get("filename", "")
+            spectrogram_url = session_data.get("spectrogram_url", None)
             
             # Extract individual emotion probabilities
             neutral_prob = emotion_probs[0] if len(emotion_probs) > 0 else 0.0
@@ -919,9 +940,10 @@ async def write_to_snowflake(session_data: dict):
                 ACTIVE_PERCENTAGE,
                 FATIGUED_PERCENTAGE,
                 AI_SUPERVISOR_REPORT,
-                FILENAME
+                FILENAME,
+                SPECTROGRAM_URL
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """
             
@@ -940,7 +962,8 @@ async def write_to_snowflake(session_data: dict):
                 active_percentage,
                 fatigued_percentage,
                 ai_supervisor_report,
-                filename
+                filename,
+                spectrogram_url
             ))
             
             conn.commit()
@@ -964,7 +987,10 @@ async def get_stop_recording(request):
         
         saved_filename = CustomMediaRecorder.instance.stop_recording()
         logger.info(f"Stopped recording, saved to: {saved_filename}")
-        
+
+        spaces_key = os.path.basename(saved_filename)
+        public_audio_url = upload_to_spaces(saved_filename, spaces_key)
+
         if AudioAnalyzer.instance is None:
             logger.error("Audio analyzer not initialized")
             return web.Response(status=500, content_type="application/json", text=json.dumps({"error": "Audio analyzer not initialized", "success": False}))
@@ -972,6 +998,32 @@ async def get_stop_recording(request):
         logger.info("Starting audio analysis...")
         analysis = await AudioAnalyzer.instance.run_audio_analysis_threaded(saved_filename)
         logger.info(f"Audio analysis completed. Result keys: {list(analysis.keys())}")
+        logger.info(f"Checking for spectrogramFilename in analysis...")
+        
+        # Upload spectrogram image to DigitalOcean Spaces if available
+        public_spectrogram_url = None
+        if "spectrogramFilename" in analysis:
+            logger.info(f"spectrogramFilename found in analysis: {analysis.get('spectrogramFilename')}")
+        else:
+            logger.warning(f"spectrogramFilename NOT found in analysis result!")
+        
+        if "spectrogramFilename" in analysis and analysis["spectrogramFilename"]:
+            spectrogram_filename = analysis["spectrogramFilename"]
+            logger.info(f"Attempting to upload spectrogram: {spectrogram_filename}")
+            if os.path.exists(spectrogram_filename):
+                logger.info(f"Spectrogram file exists, size: {os.path.getsize(spectrogram_filename)} bytes")
+                spectrogram_spaces_key = os.path.basename(spectrogram_filename)
+                logger.info(f"Uploading to Spaces with key: {spectrogram_spaces_key}")
+                public_spectrogram_url = upload_to_spaces(spectrogram_filename, spectrogram_spaces_key)
+                if public_spectrogram_url:
+                    logger.info(f"Successfully uploaded spectrogram to Spaces: {public_spectrogram_url}")
+                    analysis["spectrogramImageUrl"] = public_spectrogram_url
+                else:
+                    logger.warning("Failed to upload spectrogram to Spaces (upload_to_spaces returned None)")
+            else:
+                logger.warning(f"Spectrogram file not found: {spectrogram_filename}")
+        else:
+            logger.warning(f"Spectrogram filename not in analysis result. Available keys: {list(analysis.keys())}")
         
         # Check if analysis returned an error
         if "error" in analysis:
@@ -1067,9 +1119,145 @@ async def get_stop_recording(request):
             "active_percentage": active_percentage,
             "fatigued_percentage": fatigued_percentage,
             "ai_supervisor_report": gemini_analysis,
-            "filename": saved_filename
+            "filename": public_audio_url if public_audio_url else saved_filename,
+            "spectrogram_url": public_spectrogram_url if public_spectrogram_url else None
         }
+        logger.info(f"Spectrogram URL being saved to Snowflake: {session_data.get('spectrogram_url', 'NULL')}")
         await write_to_snowflake(session_data)
+        
+# --- START SOLANA NFT MINTING ---
+        logger.info("Minting Solana NFT report...")
+        try:
+            # 1. Get API key and wallet from environment
+            helius_api_key = os.environ["HELIUS_API_KEY"]
+            destination_wallet = os.environ["YOUR_SOLANA_WALLET"]
+
+            # 2. Get all the data you already have
+            gemini_report = analysis.get("ai_supervisor_report", "No report.")
+            audio_url = session_data.get("filename", "") # The Spaces URL for the audio
+            spectrogram_url = session_data.get("spectrogram_url", "") # The Spaces URL for the image
+            fatigue_status = session_data.get("fatigue_status", "Unknown")
+            dominant_emotion = session_data.get("dominant_emotion", "Unknown")
+
+            # 3. Handle missing image (critical for minting)
+            if not spectrogram_url:
+                raise Exception("Spectrogram URL not found, skipping mint.")
+
+            # 4. Define the NFT metadata
+            nft_name = f"TowerGuard Session Report {int(time.time())}"
+
+            # 5. Call the Helius Minting API
+            # Try both REST and JSON-RPC formats with the v1 endpoint
+            minting_api_url = f"https://api.helius.xyz/v1/mint?api-key={helius_api_key}"
+            
+            headers = {
+                "Content-Type": "application/json"
+            }
+
+            # First, try REST API format (direct payload)
+            rest_payload = {
+                "name": nft_name,
+                "symbol": "TGR",
+                "description": gemini_report,
+                "recipient": destination_wallet,
+                "imageUrl": spectrogram_url,
+                "externalUrl": audio_url,
+                "attributes": [
+                    {"trait_type": "Fatigue Status", "value": fatigue_status},
+                    {"trait_type": "Dominant Emotion", "value": dominant_emotion},
+                    {"trait_type": "Transcription", "value": analysis.get("transcription", "")[:100] + "..."}
+                ]
+            }
+
+            mint_success = False
+            async with ClientSession() as session:
+                # Try REST API format first
+                try:
+                    logger.info(f"Trying REST API format with Helius Minting API: {minting_api_url.split('?')[0]}")
+                    async with session.post(minting_api_url, json=rest_payload, headers=headers, timeout=ClientTimeout(total=45)) as response:
+                        response_text = await response.text()
+                        logger.info(f"Helius REST response status: {response.status}, body: {response_text[:500]}")
+                        
+                        if response.status == 200:
+                            mint_result = await response.json()
+                            # Check for errors
+                            if "error" not in mint_result:
+                                result = mint_result.get("result", mint_result)
+                                asset_id = result.get("assetId") or result.get("mint")
+                                signature = result.get("signature")
+                                
+                                if asset_id:
+                                    logger.info(f"Successfully minted NFT with assetId: {asset_id}")
+                                    analysis['nft_mint_address'] = asset_id
+                                    if signature:
+                                        analysis['nft_transaction_signature'] = signature
+                                    mint_success = True
+                                elif signature:
+                                    logger.warning(f"NFT mint transaction submitted (signature: {signature}) but assetId not yet available")
+                                    analysis['nft_transaction_signature'] = signature
+                                    analysis['nft_mint_status'] = 'pending'
+                                    mint_success = True
+                except Exception as e:
+                    logger.warning(f"REST API format failed: {e}")
+                
+                # If REST failed, try JSON-RPC format with the RPC endpoint (which we know works)
+                if not mint_success:
+                    try:
+                        logger.info("REST format failed, trying JSON-RPC format with RPC endpoint...")
+                        rpc_url = f"https://mainnet.helius-rpc.com/?api-key={helius_api_key}"
+                        jsonrpc_payload = {
+                            "jsonrpc": "2.0",
+                            "id": "1",
+                            "method": "mintCompressedNft",
+                            "params": {
+                                "name": nft_name,
+                                "symbol": "TGR",
+                                "description": gemini_report,
+                                "owner": destination_wallet,
+                                "imageUrl": spectrogram_url,
+                                "externalUrl": audio_url,
+                                "attributes": [
+                                    {"trait_type": "Fatigue Status", "value": fatigue_status},
+                                    {"trait_type": "Dominant Emotion", "value": dominant_emotion},
+                                    {"trait_type": "Transcription", "value": analysis.get("transcription", "")[:100] + "..."}
+                                ],
+                                "confirmTransaction": True
+                            }
+                        }
+                        
+                        async with session.post(rpc_url, json=jsonrpc_payload, headers=headers, timeout=ClientTimeout(total=45)) as response:
+                            response_text = await response.text()
+                            logger.info(f"Helius RPC response status: {response.status}, body: {response_text[:500]}")
+                            
+                            if response.status == 200:
+                                mint_result = await response.json()
+                                if "error" not in mint_result:
+                                    result = mint_result.get("result", {})
+                                    asset_id = result.get("assetId")
+                                    signature = result.get("signature")
+                                    
+                                    if asset_id:
+                                        logger.info(f"Successfully minted NFT with assetId: {asset_id}")
+                                        analysis['nft_mint_address'] = asset_id
+                                        if signature:
+                                            analysis['nft_transaction_signature'] = signature
+                                        mint_success = True
+                                    elif signature:
+                                        logger.warning(f"NFT mint transaction submitted (signature: {signature}) but assetId not yet available")
+                                        analysis['nft_transaction_signature'] = signature
+                                        analysis['nft_mint_status'] = 'pending'
+                                        mint_success = True
+                    except Exception as e:
+                        logger.error(f"JSON-RPC format also failed: {e}")
+                
+                if not mint_success:
+                    logger.error("Failed to mint NFT with both REST and JSON-RPC formats. Please check Helius API documentation.")
+
+        except Exception as e:
+            logger.error(f"Error during NFT minting process: {e}")
+            # This ensures that even if minting fails, the app does not crash
+
+        # --- END SOLANA NFT MINTING ---
         
         logger.info(f"Returning successful analysis response with AI supervisor report")
         return web.Response(content_type="application/json", status=200, text=json.dumps(analysis))
@@ -1181,6 +1369,51 @@ def main():
     app.router.add_get("/stop", get_stop_recording)
     app.router.add_post("/offer", post_offer)
     web.run_app(app, host="127.0.0.1", port=8080)
+
+import boto3
+
+# Add this function somewhere in your file
+def upload_to_spaces(local_filename, spaces_filename):
+    try:
+        # Get credentials from environment variables
+        spaces_key = os.environ.get("SPACES_KEY")
+        spaces_secret = os.environ.get("SPACES_SECRET")
+        spaces_region = os.environ.get("SPACES_REGION", "nyc3")
+        spaces_name = os.environ.get("SPACES_NAME", "your-space-name")
+        
+        if not spaces_key or not spaces_secret:
+            logger.warning("SPACES_KEY or SPACES_SECRET not set, skipping upload to Spaces")
+            return None
+        
+        if spaces_name == "your-space-name":
+            logger.warning("SPACES_NAME not configured (using placeholder), skipping upload to Spaces")
+            return None
+        
+        endpoint_url = f"https://{spaces_region}.digitaloceanspaces.com"
+        
+        logger.info(f"Uploading {local_filename} to DigitalOcean Spaces: {spaces_name}")
+        session = boto3.session.Session()
+        client = session.client('s3',
+                                region_name=spaces_region,
+                                endpoint_url=endpoint_url,
+                                aws_access_key_id=spaces_key,
+                                aws_secret_access_key=spaces_secret)
+
+        client.upload_file(local_filename,
+                           spaces_name,
+                           spaces_filename,
+                           ExtraArgs={'ACL': 'public-read'}) # Makes file public
+
+        url = f"https://{spaces_name}.{spaces_region}.digitaloceanspaces.com/{spaces_filename}"
+        logger.info(f"Successfully uploaded to Spaces: {url}")
+        return url
+    except KeyError as e:
+        logger.error(f"Missing environment variable for Spaces upload: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error uploading to Spaces: {e}", exc_info=True)
+        return None
+
 
 if __name__ == "__main__":
     main()
