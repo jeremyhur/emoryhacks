@@ -973,10 +973,93 @@ async def write_to_snowflake(session_data: dict):
         
         session_id = await loop.run_in_executor(None, _write_to_snowflake_sync)
         logger.info(f"Successfully wrote session data to Snowflake: {session_id}")
-        return True
+        return session_id
         
     except Exception as e:
         logger.error(f"Error writing to Snowflake: {e}", exc_info=True)
+        return False
+
+async def update_snowflake_nft_transaction(session_id: str, transaction_url: str):
+    """
+    Update Snowflake record with NFT transaction URL
+    """
+    if not SNOWFLAKE_AVAILABLE:
+        logger.warning("Snowflake connector not available, skipping NFT transaction update")
+        return False
+    
+    try:
+        account = os.environ.get("SNOWFLAKE_ACCOUNT")
+        user = os.environ.get("SNOWFLAKE_USER")
+        password = os.environ.get("SNOWFLAKE_PASSWORD")
+        warehouse = os.environ.get("SNOWFLAKE_WAREHOUSE")
+        database = os.environ.get("SNOWFLAKE_DATABASE")
+        schema = os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC")
+        table = os.environ.get("SNOWFLAKE_TABLE", "MONITORING_SESSIONS")
+        
+        if not all([account, user, password, warehouse, database, session_id]):
+            logger.warning("Snowflake credentials or session_id not configured, skipping NFT transaction update")
+            return False
+        
+        loop = asyncio.get_event_loop()
+        
+        def _update_snowflake_sync():
+            conn = snowflake.connector.connect(
+                user=user,
+                password=password,
+                account=account,
+                warehouse=warehouse,
+                database=database,
+                schema=schema,
+                role='SYSADMIN'
+            )
+            
+            cursor = conn.cursor()
+            fully_qualified_table = f"{database}.{schema}.{table}"
+            
+            # Check if NFT_TRANSACTION_URL column exists, if not, try to add it
+            try:
+                # Try to update - if column doesn't exist, this will fail gracefully
+                update_query = f"""
+                UPDATE {fully_qualified_table}
+                SET NFT_TRANSACTION_URL = %s
+                WHERE SESSION_ID = %s
+                """
+                cursor.execute(update_query, (transaction_url, session_id))
+                conn.commit()
+                logger.info(f"Updated Snowflake record {session_id} with NFT transaction URL")
+            except Exception as e:
+                # Column might not exist, try to add it
+                logger.warning(f"Could not update NFT_TRANSACTION_URL (column may not exist): {e}")
+                try:
+                    alter_query = f"""
+                    ALTER TABLE {fully_qualified_table}
+                    ADD COLUMN NFT_TRANSACTION_URL VARCHAR(500)
+                    """
+                    cursor.execute(alter_query)
+                    conn.commit()
+                    logger.info("Added NFT_TRANSACTION_URL column to Snowflake table")
+                    
+                    # Now try the update again
+                    update_query = f"""
+                    UPDATE {fully_qualified_table}
+                    SET NFT_TRANSACTION_URL = %s
+                    WHERE SESSION_ID = %s
+                    """
+                    cursor.execute(update_query, (transaction_url, session_id))
+                    conn.commit()
+                    logger.info(f"Updated Snowflake record {session_id} with NFT transaction URL")
+                except Exception as alter_error:
+                    logger.error(f"Could not add NFT_TRANSACTION_URL column: {alter_error}")
+            
+            cursor.close()
+            conn.close()
+            return True
+        
+        await loop.run_in_executor(None, _update_snowflake_sync)
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error updating Snowflake with NFT transaction URL: {e}", exc_info=True)
         return False
 
 async def get_stop_recording(request):
@@ -1123,7 +1206,7 @@ async def get_stop_recording(request):
             "spectrogram_url": public_spectrogram_url if public_spectrogram_url else None
         }
         logger.info(f"Spectrogram URL being saved to Snowflake: {session_data.get('spectrogram_url', 'NULL')}")
-        await write_to_snowflake(session_data)
+        session_id = await write_to_snowflake(session_data)
         
 # --- START SOLANA NFT MINTING ---
         logger.info("Minting Solana NFT report...")
@@ -1144,7 +1227,10 @@ async def get_stop_recording(request):
                 raise Exception("Spectrogram URL not found, skipping mint.")
 
             # 4. Define the NFT metadata
-            nft_name = f"TowerGuard Session Report {int(time.time())}"
+            # Note: Bubblegum program has a 32 character limit for name field
+            # Using shorter name to comply with the limit
+            timestamp = int(time.time())
+            nft_name = f"TG Report {timestamp}"
 
             # 5. Call the Helius Minting API
             # Try both REST and JSON-RPC formats with the v1 endpoint
@@ -1191,11 +1277,19 @@ async def get_stop_recording(request):
                                     analysis['nft_mint_address'] = asset_id
                                     if signature:
                                         analysis['nft_transaction_signature'] = signature
+                                        # Update Snowflake with transaction URL
+                                        if session_id:
+                                            transaction_url = f"https://solscan.io/tx/{signature}"
+                                            await update_snowflake_nft_transaction(session_id, transaction_url)
                                     mint_success = True
                                 elif signature:
                                     logger.warning(f"NFT mint transaction submitted (signature: {signature}) but assetId not yet available")
                                     analysis['nft_transaction_signature'] = signature
                                     analysis['nft_mint_status'] = 'pending'
+                                    # Update Snowflake with transaction URL even if pending
+                                    if session_id:
+                                        transaction_url = f"https://solscan.io/tx/{signature}"
+                                        await update_snowflake_nft_transaction(session_id, transaction_url)
                                     mint_success = True
                 except Exception as e:
                     logger.warning(f"REST API format failed: {e}")
@@ -1241,11 +1335,19 @@ async def get_stop_recording(request):
                                         analysis['nft_mint_address'] = asset_id
                                         if signature:
                                             analysis['nft_transaction_signature'] = signature
+                                            # Update Snowflake with transaction URL
+                                            if session_id:
+                                                transaction_url = f"https://solscan.io/tx/{signature}"
+                                                await update_snowflake_nft_transaction(session_id, transaction_url)
                                         mint_success = True
                                     elif signature:
                                         logger.warning(f"NFT mint transaction submitted (signature: {signature}) but assetId not yet available")
                                         analysis['nft_transaction_signature'] = signature
                                         analysis['nft_mint_status'] = 'pending'
+                                        # Update Snowflake with transaction URL even if pending
+                                        if session_id:
+                                            transaction_url = f"https://solscan.io/tx/{signature}"
+                                            await update_snowflake_nft_transaction(session_id, transaction_url)
                                         mint_success = True
                     except Exception as e:
                         logger.error(f"JSON-RPC format also failed: {e}")
@@ -1286,6 +1388,102 @@ async def get_stop_recording(request):
                 text=json.dumps(response_data)
             )
         return web.Response(status=500, content_type="application/json", text=json.dumps({"error": str(e), "success": False}))
+
+async def get_nft_status(request):
+    """Check NFT minting status by transaction signature"""
+    try:
+        signature = request.query.get('signature', None)
+        if not signature:
+            return web.Response(status=400, content_type="application/json", 
+                              text=json.dumps({"error": "Missing signature parameter"}))
+        
+        helius_api_key = os.environ.get("HELIUS_API_KEY")
+        if not helius_api_key:
+            return web.Response(status=500, content_type="application/json",
+                              text=json.dumps({"error": "HELIUS_API_KEY not configured"}))
+        
+        # Use Helius DAS API to check asset by transaction signature
+        # First, get the transaction details
+        rpc_url = f"https://mainnet.helius-rpc.com/?api-key={helius_api_key}"
+        
+        # Get transaction details
+        get_tx_payload = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "getTransaction",
+            "params": {
+                "signature": signature,
+                "encoding": "json",
+                "maxSupportedTransactionVersion": 0
+            }
+        }
+        
+        async with ClientSession() as session:
+            async with session.post(rpc_url, json=get_tx_payload, 
+                                  headers={"Content-Type": "application/json"},
+                                  timeout=ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    tx_result = await response.json()
+                    if "error" in tx_result:
+                        return web.Response(status=200, content_type="application/json",
+                                          text=json.dumps({
+                                              "status": "pending",
+                                              "message": "Transaction not yet confirmed"
+                                          }))
+                    
+                    # Transaction exists, now check for asset using DAS API
+                    # Try to get asset by owner and recent transactions
+                    owner = os.environ.get("YOUR_SOLANA_WALLET")
+                    if owner:
+                        # Use getAssetsByOwner to find recently minted assets
+                        das_payload = {
+                            "jsonrpc": "2.0",
+                            "id": "1",
+                            "method": "getAssetsByOwner",
+                            "params": {
+                                "ownerAddress": owner,
+                                "page": 1,
+                                "limit": 10
+                            }
+                        }
+                        
+                        async with session.post(rpc_url, json=das_payload,
+                                              headers={"Content-Type": "application/json"},
+                                              timeout=ClientTimeout(total=10)) as das_response:
+                            if das_response.status == 200:
+                                das_result = await das_response.json()
+                                if "result" in das_result and "items" in das_result["result"]:
+                                    # Check if any asset was minted recently (within last 5 minutes)
+                                    items = das_result["result"]["items"]
+                                    for item in items:
+                                        if item.get("content", {}).get("metadata", {}).get("name", "").startswith("TG Report"):
+                                            # Found a recent TowerGuard NFT
+                                            asset_id = item.get("id")
+                                            if asset_id:
+                                                return web.Response(status=200, content_type="application/json",
+                                                                  text=json.dumps({
+                                                                      "status": "confirmed",
+                                                                      "assetId": asset_id,
+                                                                      "signature": signature,
+                                                                      "explorerUrl": f"https://solscan.io/token/{asset_id}"
+                                                                  }))
+                    
+                    # Transaction confirmed but asset ID not found yet
+                    return web.Response(status=200, content_type="application/json",
+                                      text=json.dumps({
+                                          "status": "confirmed",
+                                          "signature": signature,
+                                          "assetId": None,
+                                          "message": "Transaction confirmed, asset ID pending"
+                                      }))
+                else:
+                    return web.Response(status=500, content_type="application/json",
+                                      text=json.dumps({"error": "Failed to check transaction status"}))
+    
+    except Exception as e:
+        logger.error(f"Error checking NFT status: {e}", exc_info=True)
+        return web.Response(status=500, content_type="application/json",
+                          text=json.dumps({"error": str(e)}))
 
 async def post_offer(request):
     params = await request.json()
@@ -1367,6 +1565,7 @@ def main():
     app.router.add_get("/assets/{path:.*}", get_asset)
     app.router.add_post("/start", post_start_recording)
     app.router.add_get("/stop", get_stop_recording)
+    app.router.add_get("/nft-status", get_nft_status)
     app.router.add_post("/offer", post_offer)
     web.run_app(app, host="127.0.0.1", port=8080)
 

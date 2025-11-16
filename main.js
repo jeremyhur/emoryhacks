@@ -147,6 +147,17 @@ document.getElementById("play").onclick = () => {
                 visualStatus.textContent = "ACTIVE";
                 visualStatus.style.color = "var(--atc-green)";
 
+                // Display NFT transaction link if available
+                const nftLinkElement = document.getElementById("nft-transaction-link");
+                if (result["nft_transaction_signature"]) {
+                    const signature = result["nft_transaction_signature"];
+                    const transactionUrl = `https://solscan.io/tx/${signature}`;
+                    nftLinkElement.innerHTML = `<a href="${transactionUrl}" target="_blank" class="nft-link">View Transaction on Solscan</a>`;
+                    console.log("NFT transaction link:", transactionUrl);
+                } else {
+                    nftLinkElement.textContent = "NO NFT MINTED";
+                }
+
                 // Only show spectrogram if we have data
                 if (result["spectrogramImageData"] && result["spectrogramImageData"].length > 0 && 
                     result["spectrogramWidth"] > 0 && result["spectrogramHeight"] > 0) {

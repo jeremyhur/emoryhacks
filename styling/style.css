@@ -444,7 +444,8 @@ body {
     position: relative;
 }
 
-.ai-supervisor-text {
+.ai-supervisor-text,
+.nft-link-text {
     font-size: 13px;
     color: var(--atc-green);
     font-family: 'Courier New', monospace;
@@ -456,6 +457,19 @@ body {
     white-space: pre-wrap;
     word-wrap: break-word;
     text-align: left;
+}
+
+.nft-link {
+    color: var(--atc-green);
+    text-decoration: underline;
+    text-decoration-color: var(--atc-amber);
+    transition: all 0.3s;
+}
+
+.nft-link:hover {
+    color: var(--atc-amber);
+    text-shadow: 0 0 8px var(--atc-amber);
+    text-decoration-color: var(--atc-green);
 }
 
 /* Loading Screen */
@@ -496,6 +510,41 @@ body {
     height: 100%;
     object-fit: contain;
     filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.8));
+}
+
+#towerguard-title {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-top: 30px;
+    font-size: 48px;
+    font-weight: bold;
+    color: var(--atc-green);
+    text-shadow: 
+        0 0 10px var(--atc-green),
+        0 0 20px var(--atc-green),
+        0 0 30px var(--atc-green);
+    letter-spacing: 8px;
+    font-family: 'Courier New', 'Monaco', monospace;
+    opacity: 0%;
+    animation-name: title-fade-in;
+    animation-duration: 2s;
+    animation-delay: 1s;
+    animation-timing-function: ease-out;
+    animation-fill-mode: forwards;
+    white-space: nowrap;
+}
+
+@keyframes title-fade-in {
+    0% {
+        opacity: 0%;
+        transform: translateX(-50%) translateY(-20px);
+    }
+    100% {
+        opacity: 100%;
+        transform: translateX(-50%) translateY(0);
+    }
 }
 
 @keyframes airplane-fly-in {
