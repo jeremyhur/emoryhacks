@@ -6,6 +6,8 @@ import logging
 import threading
 import queue
 import io
+import time
+import google.generativeai as genai
 
 # Prevent any library from trying to use torchcodec
 os.environ["TORCHAUDIO_USE_BACKEND_DISPATCHER"] = "1"
@@ -32,7 +34,7 @@ import torchvision
 import librosa
 import scipy.signal
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
-from transformers import WhisperForConditionalGeneration, HubertForSequenceClassification, ViTImageProcessor, ViTForImageClassification, ViTFeatureExtractor
+from transformers import WhisperForConditionalGeneration, HubertForSequenceClassification, ViTImageProcessor, ViTForImageClassification
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
@@ -46,6 +48,9 @@ ROOT = os.path.dirname(__file__)
 logger = logging.getLogger("pc")
 pcs = set()
 relay = MediaRelay()
+
+# Store current fatigue status from video analysis
+current_fatigue_status = {"status": "Active", "last_updated": None}
 
 # Device detection: prefer CUDA, then MPS (Apple Silicon), then CPU
 # For M2 Macs, CPU is often faster for small batch inference due to MPS overhead
@@ -87,13 +92,14 @@ class VideoTransformTrack(MediaStreamTrack):
         super().__init__()
         self.track = track
         self.device = DEVICE
-        self.model_path = 'xacer/vit-base-patch16-224-fatigue'
-        self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+        self.model_path = 'jeremoo/vit-fef-finetuned'
+        cascade_path = os.path.join(ROOT, 'faceanalysis', 'haarcascade_frontalface_default.xml')
+        self.face_cascade = cv2.CascadeClassifier(cascade_path)
         
+        logger.info(f"Loading custom ViT fatigue detection model: {self.model_path}")
         self.processor = ViTImageProcessor.from_pretrained(self.model_path)
-        self.model = ViTForImageClassification.from_pretrained(self.model_path,num_labels=2,ignore_mismatched_sizes=True).to(self.device)
+        self.model = ViTForImageClassification.from_pretrained(self.model_path).to(self.device)
         self.model.eval()  # Set to evaluation mode for better performance
-        self.feature_extractor = ViTFeatureExtractor.from_pretrained(self.model_path) 
         self.image_mean, self.image_std = self.processor.image_mean, self.processor.image_std
 
         self.transform = Compose([
@@ -144,10 +150,32 @@ class VideoTransformTrack(MediaStreamTrack):
                     # Process on device, only move to CPU for final result
                     predicted_class = torch.argmax(output_logits, dim=1).item()
                     
-                if predicted_class == 1:
-                    self.class_value = "Active"
-                elif predicted_class == 0:
-                    self.class_value = "Fatigued"
+                # Map model predictions to our labels
+                # Get class names from model config if available
+                if hasattr(self.model.config, 'id2label') and self.model.config.id2label:
+                    class_name = self.model.config.id2label.get(predicted_class, str(predicted_class))
+                    # Map based on class name (adjust based on your model's actual labels)
+                    if 'fatigue' in class_name.lower() or 'drowsy' in class_name.lower() or 'tired' in class_name.lower():
+                        self.class_value = "Fatigued"
+                    elif 'active' in class_name.lower() or 'awake' in class_name.lower() or 'alert' in class_name.lower():
+                        self.class_value = "Active"
+                    else:
+                        # Fallback: assume 0 = Fatigued, 1 = Active
+                        if predicted_class == 0:
+                            self.class_value = "Fatigued"
+                        else:
+                            self.class_value = "Active"
+                else:
+                        # Fallback: assume 0 = Fatigued, 1 = Active
+                        if predicted_class == 0:
+                            self.class_value = "Fatigued"
+                        elif predicted_class == 1:
+                            self.class_value = "Active"
+                
+                # Update global fatigue status
+                global current_fatigue_status
+                current_fatigue_status["status"] = self.class_value
+                current_fatigue_status["last_updated"] = time.time()
             
             # Draw bounding box and label
             cv2.putText(outgoing_image, f'{self.class_value}',(x,y-10),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,0),2)
@@ -661,6 +689,72 @@ async def get_asset(request):
         content = f.read()
     return web.Response(content_type=content_type, body=content)
 
+async def get_gemini_analysis(fatigue_status: str, emotion_logits: list, transcription: str) -> str:
+    """
+    Call Gemini API to get AI supervisor analysis
+    """
+    try:
+        # Get Gemini API key from environment variable
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logger.warning("GEMINI_API_KEY not set, skipping Gemini analysis")
+            return "AI Supervisor analysis unavailable (API key not configured)"
+        
+        # Configure the API key
+        genai.configure(api_key=api_key)
+        
+        # Determine dominant emotion from logits
+        if emotion_logits and len(emotion_logits) > 0 and len(emotion_logits[0]) >= 4:
+            logits = emotion_logits[0]
+            emotion_labels = ["Neutral", "Happy", "Angry", "Sad"]
+            dominant_emotion_idx = logits.index(max(logits))
+            dominant_emotion = emotion_labels[dominant_emotion_idx]
+        else:
+            dominant_emotion = "Unknown"
+        
+        # Create the prompt
+        prompt = f"""You are an Air Traffic Control supervisor. Analyze the following operator communication.
+
+Fatigue Status: {fatigue_status}
+
+Dominant Emotion: {dominant_emotion}
+
+Transcription: {transcription if transcription else "No transcription available"}
+
+Provide a brief, 2-sentence analysis of the operator's current state and recommend a simple action. For example: 'Operator sounds stressed and fatigued. Communication is clipped. Recommend a 5-minute break.'"""
+        
+        # Create the model and generate content
+        # Run in executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        
+        # Try different model names in order of preference
+        model_names = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-pro']
+        response = None
+        
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Run the synchronous API call in a thread pool
+                def generate_with_model():
+                    return model.generate_content(prompt)
+                
+                response = await loop.run_in_executor(None, generate_with_model)
+                if response and response.text:
+                    logger.info(f"Successfully used model: {model_name}")
+                    break
+            except Exception as e:
+                logger.warning(f"Failed to use model {model_name}: {e}")
+                continue
+        
+        if response and response.text:
+            return response.text
+        else:
+            return "AI Supervisor analysis unavailable (no response from API)"
+    
+    except Exception as e:
+        logger.error(f"Error calling Gemini API: {e}", exc_info=True)
+        return f"AI Supervisor analysis unavailable (error: {str(e)})"
+
 async def post_start_recording(request):
     try:
         if CustomMediaRecorder.instance is None:
@@ -722,7 +816,20 @@ async def get_stop_recording(request):
         if "labels" not in analysis:
             analysis["labels"] = ["Neutral", "Happy", "Angry", "Sad"]
         
-        logger.info(f"Returning successful analysis response")
+        # Get current fatigue status
+        global current_fatigue_status
+        fatigue_status = current_fatigue_status.get("status", "Active")
+        
+        # Call Gemini API for AI supervisor analysis
+        logger.info("Calling Gemini API for AI supervisor analysis...")
+        gemini_analysis = await get_gemini_analysis(
+            fatigue_status=fatigue_status,
+            emotion_logits=analysis.get("logits", [[0.25, 0.25, 0.25, 0.25]]),
+            transcription=analysis.get("transcription", "")
+        )
+        analysis["ai_supervisor_report"] = gemini_analysis
+        
+        logger.info(f"Returning successful analysis response with AI supervisor report")
         return web.Response(content_type="application/json", status=200, text=json.dumps(analysis))
     except Exception as e:
         logger.error(f"Error stopping recording: {e}", exc_info=True)
