@@ -91,6 +91,30 @@ document.getElementById("play").onclick = () => {
                     console.error("AI supervisor report element not found!");
                 }
 
+                // Play audio if available
+                if (result["ai_supervisor_audio"]) {
+                    try {
+                        // Decode base64 audio data
+                        const audioBase64 = result["ai_supervisor_audio"];
+                        const audioBytes = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+                        const audioBlob = new Blob([audioBytes], { type: 'audio/mpeg' });
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        
+                        // Create and play audio
+                        const audio = new Audio(audioUrl);
+                        audio.play().catch(error => {
+                            console.error("Error playing audio:", error);
+                        });
+                        
+                        // Clean up URL after playback
+                        audio.addEventListener('ended', () => {
+                            URL.revokeObjectURL(audioUrl);
+                        });
+                    } catch (error) {
+                        console.error("Error processing audio:", error);
+                    }
+                }
+
                 // Update emotion label with percentages
                 if (result["logits"] && result["logits"][0]) {
                     const logits = result["logits"][0];

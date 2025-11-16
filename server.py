@@ -7,7 +7,17 @@ import threading
 import queue
 import io
 import time
+import base64
+import math
+from datetime import datetime
 import google.generativeai as genai
+try:
+    import snowflake.connector
+    SNOWFLAKE_AVAILABLE = True
+except ImportError:
+    SNOWFLAKE_AVAILABLE = False
+    logger = logging.getLogger("pc")
+    logger.warning("snowflake-connector-python not installed. Snowflake integration disabled.")
 
 # Prevent any library from trying to use torchcodec
 os.environ["TORCHAUDIO_USE_BACKEND_DISPATCHER"] = "1"
@@ -35,7 +45,7 @@ import librosa
 import scipy.signal
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 from transformers import WhisperForConditionalGeneration, HubertForSequenceClassification, ViTImageProcessor, ViTForImageClassification
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from PIL import Image
@@ -264,10 +274,20 @@ class CustomMediaRecorder:
             self.task.cancel()
             self.task = None
 
-            for packet in self.stream.encode(None):
-                self.container.mux(packet)
+            # Only flush if container and stream exist
+            if self.container is not None and self.stream is not None:
+                try:
+                    for packet in self.stream.encode(None):
+                        self.container.mux(packet)
+                except Exception as e:
+                    logger.error(f"Error flushing stream in stop(): {e}")
         
-        self.container.close()
+        # Only close container if it exists
+        if self.container is not None:
+            try:
+                self.container.close()
+            except Exception as e:
+                logger.error(f"Error closing container in stop(): {e}")
 
         self.track = None
         self.stream = None
@@ -755,6 +775,54 @@ Provide a brief, 2-sentence analysis of the operator's current state and recomme
         logger.error(f"Error calling Gemini API: {e}", exc_info=True)
         return f"AI Supervisor analysis unavailable (error: {str(e)})"
 
+async def get_elevenlabs_audio(text: str) -> bytes:
+    """
+    Convert text to speech using ElevenLabs API
+    Returns audio data as bytes
+    """
+    try:
+        # Get ElevenLabs API key from environment variable
+        api_key = os.environ.get("ELEVENLABS_API_KEY")
+        if not api_key:
+            logger.warning("ELEVENLABS_API_KEY not set, skipping audio generation")
+            return None
+        
+        # Get voice ID from environment variable (default to a common voice)
+        voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "ruirxsoakN0GWmGNIo04")  # John Morgan
+        logger.info(f"Using ElevenLabs voice ID: {voice_id}")
+        
+        # ElevenLabs API endpoint
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": api_key
+        }
+        
+        data = {
+            "text": text,
+            "model_id": "eleven_monolingual_v1",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.5
+            }
+        }
+        
+        async with ClientSession() as session:
+            async with session.post(url, json=data, headers=headers, timeout=ClientTimeout(total=30)) as response:
+                if response.status == 200:
+                    audio_data = await response.read()
+                    return audio_data
+                else:
+                    error_text = await response.text()
+                    logger.error(f"ElevenLabs API error: {response.status} - {error_text}")
+                    return None
+    
+    except Exception as e:
+        logger.error(f"Error calling ElevenLabs API: {e}", exc_info=True)
+        return None
+
 async def post_start_recording(request):
     try:
         if CustomMediaRecorder.instance is None:
@@ -764,6 +832,129 @@ async def post_start_recording(request):
     except Exception as e:
         logger.error(f"Error starting recording: {e}", exc_info=True)
         return web.Response(status=500, content_type="application/json", text=json.dumps({"error": str(e)}))
+        
+async def write_to_snowflake(session_data: dict):
+    """
+    Write session data to Snowflake database
+    """
+    if not SNOWFLAKE_AVAILABLE:
+        logger.warning("Snowflake connector not available, skipping database write")
+        return False
+    
+    try:
+        # Get Snowflake credentials from environment variables
+        account = os.environ.get("SNOWFLAKE_ACCOUNT")
+        user = os.environ.get("SNOWFLAKE_USER")
+        password = os.environ.get("SNOWFLAKE_PASSWORD")
+        warehouse = os.environ.get("SNOWFLAKE_WAREHOUSE")
+        database = os.environ.get("SNOWFLAKE_DATABASE")
+        schema = os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC")
+        table = os.environ.get("SNOWFLAKE_TABLE", "MONITORING_SESSIONS")
+        
+        if not all([account, user, password, warehouse, database]):
+            logger.warning("Snowflake credentials not fully configured, skipping database write")
+            return False
+        
+        # Connect to Snowflake (run in executor to avoid blocking)
+        loop = asyncio.get_event_loop()
+        
+        def _write_to_snowflake_sync():
+            conn = snowflake.connector.connect(
+                user=user,
+                password=password,
+                account=account,
+                warehouse=warehouse,
+                database=database,
+                schema=schema,
+                role='SYSADMIN'  # <-- The critical authorization fix
+            )
+            
+            cursor = conn.cursor()
+            
+            # First, verify the table exists and check its structure
+            try:
+                cursor.execute(f"DESCRIBE TABLE {table}")
+                columns = cursor.fetchall()
+                column_names = [col[0].upper() for col in columns]
+                logger.info(f"Table {table} columns: {column_names}")
+            except Exception as e:
+                logger.error(f"Error describing table {table}: {e}")
+                logger.error("Please verify the table exists and you have the correct table name")
+                cursor.close()
+                conn.close()
+                raise
+            
+            # Prepare data for insertion
+            timestamp = session_data.get("timestamp", datetime.now())
+            fatigue_status = session_data.get("fatigue_status", "Unknown")
+            transcription = session_data.get("transcription", "")
+            emotion_probs = session_data.get("emotion_logits", [0.25, 0.25, 0.25, 0.25])
+            dominant_emotion = session_data.get("dominant_emotion", "Unknown")
+            active_percentage = session_data.get("active_percentage", 0.0)
+            fatigued_percentage = session_data.get("fatigued_percentage", 0.0)
+            ai_supervisor_report = session_data.get("ai_supervisor_report", "")
+            filename = session_data.get("filename", "")
+            
+            # Extract individual emotion probabilities
+            neutral_prob = emotion_probs[0] if len(emotion_probs) > 0 else 0.0
+            happy_prob = emotion_probs[1] if len(emotion_probs) > 1 else 0.0
+            angry_prob = emotion_probs[2] if len(emotion_probs) > 2 else 0.0
+            sad_prob = emotion_probs[3] if len(emotion_probs) > 3 else 0.0
+            
+            # Use fully qualified table name to avoid ambiguity
+            fully_qualified_table = f"{database}.{schema}.{table}"
+            
+            # Insert into Snowflake
+            insert_query = f"""
+            INSERT INTO {fully_qualified_table} (
+                SESSION_ID,
+                TIMESTAMP,
+                FATIGUE_STATUS,
+                TRANSCRIPTION,
+                DOMINANT_EMOTION,
+                NEUTRAL_PROBABILITY,
+                HAPPY_PROBABILITY,
+                ANGRY_PROBABILITY,
+                SAD_PROBABILITY,
+                ACTIVE_PERCENTAGE,
+                FATIGUED_PERCENTAGE,
+                AI_SUPERVISOR_REPORT,
+                FILENAME
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            """
+            
+            session_id = str(uuid.uuid4())
+            
+            cursor.execute(insert_query, (
+                session_id,
+                timestamp,
+                fatigue_status,
+                transcription,
+                dominant_emotion,
+                neutral_prob,
+                happy_prob,
+                angry_prob,
+                sad_prob,
+                active_percentage,
+                fatigued_percentage,
+                ai_supervisor_report,
+                filename
+            ))
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return session_id
+        
+        session_id = await loop.run_in_executor(None, _write_to_snowflake_sync)
+        logger.info(f"Successfully wrote session data to Snowflake: {session_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error writing to Snowflake: {e}", exc_info=True)
+        return False
 
 async def get_stop_recording(request):
     try:
@@ -828,6 +1019,57 @@ async def get_stop_recording(request):
             transcription=analysis.get("transcription", "")
         )
         analysis["ai_supervisor_report"] = gemini_analysis
+        
+        # Generate audio from Gemini analysis using ElevenLabs
+        if gemini_analysis and not gemini_analysis.startswith("AI Supervisor analysis unavailable"):
+            logger.info("Generating audio from AI supervisor report...")
+            audio_data = await get_elevenlabs_audio(gemini_analysis)
+            if audio_data:
+                # Encode audio as base64 for JSON transmission
+                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                analysis["ai_supervisor_audio"] = audio_base64
+                logger.info("Audio generated successfully")
+            else:
+                logger.warning("Failed to generate audio from ElevenLabs")
+        
+        # Calculate emotion percentages for Snowflake
+        emotion_logits = analysis.get("logits", [[0.25, 0.25, 0.25, 0.25]])
+        if emotion_logits and len(emotion_logits) > 0:
+            logits = emotion_logits[0]
+            # Convert logits to probabilities using softmax
+            max_logit = max(logits)
+            exp_logits = [math.exp(logit - max_logit) for logit in logits]
+            sum_exp = sum(exp_logits)
+            probabilities = [exp / sum_exp for exp in exp_logits]
+            
+            # Calculate percentages
+            active_percentage = probabilities[1] * 100  # Happy only
+            fatigued_percentage = (probabilities[0] + probabilities[2] + probabilities[3]) * 100  # Neutral + Angry + Sad
+            
+            # Determine dominant emotion
+            emotion_labels = ["Neutral", "Happy", "Angry", "Sad"]
+            dominant_emotion_idx = probabilities.index(max(probabilities))
+            dominant_emotion = emotion_labels[dominant_emotion_idx]
+        else:
+            active_percentage = 0.0
+            fatigued_percentage = 0.0
+            dominant_emotion = "Unknown"
+            probabilities = [0.25, 0.25, 0.25, 0.25]
+        
+        # Write to Snowflake database
+        logger.info("Writing session data to Snowflake...")
+        session_data = {
+            "timestamp": datetime.now(),
+            "fatigue_status": fatigue_status,
+            "transcription": analysis.get("transcription", ""),
+            "emotion_logits": probabilities,  # Store probabilities, not raw logits
+            "dominant_emotion": dominant_emotion,
+            "active_percentage": active_percentage,
+            "fatigued_percentage": fatigued_percentage,
+            "ai_supervisor_report": gemini_analysis,
+            "filename": saved_filename
+        }
+        await write_to_snowflake(session_data)
         
         logger.info(f"Returning successful analysis response with AI supervisor report")
         return web.Response(content_type="application/json", status=200, text=json.dumps(analysis))
